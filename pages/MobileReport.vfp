@@ -1,0 +1,423 @@
+<!--
+  
+Page used to display report results using dynamic filters in the Salesforce Mobile App.
+
+To use, provide an id of a report and any number of fv# parameters in the URL query string
+
+For example, /apex/MobileReport?id=123456&fv0=ABC&fv2=123 will display the report with the
+ID "123456" and modify the first report filter value to "ABC" and the third report filter value
+to 123.
+
+NOTE: This page is designed specifically for the Salesforce Mobile App. 
+Some features may not be functional outside of the Salesforce Mobile App.
+
+-->
+<apex:page controller="MobileReportController" showHeader="false" standardStylesheets="false" sidebar="false" docType="html-5.0" applyBodyTag="false" applyHtmlTag="false">
+<html xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Mobile Report</title>
+  <apex:slds /> 
+  <apex:includeLightning />
+  <style>
+    /* Styles added to html and body tags required to allow overflow scrolling to work properly in Salesforce1 */
+    html {
+      position: fixed;
+      overflow: auto;
+      width: 100%;
+      height: 100%;
+    }
+
+    html body {
+      position: fixed;
+      overflow-x: scroll;
+      height: 100%;
+      width: 100%;
+    }
+    
+    #spinner-container {
+      height: 5rem;
+      position: relative;
+    }
+    
+    #report-container, #error-container, #warning-container {
+      display: none;
+    }
+    
+    .scroller {
+      overflow:auto;
+      -webkit-overflow-scrolling:touch;
+    }
+ 
+    .slds-scope .slds-table thead th,
+    .slds-scope .slds-table tbody td {
+      	padding: .5rem;
+    }
+
+    .slds-scope .slds-table thead th {
+      	width: 175px;
+    }
+  </style>
+</head>
+
+<body class="slds-scope">
+  <div id="spinner-container">
+  <div role="status" class="slds-spinner slds-spinner_x-small slds-spinner_brand">
+    <span class="slds-assistive-text">Loading</span>
+    <div class="slds-spinner__dot-a"></div>
+    <div class="slds-spinner__dot-b"></div>
+  </div>
+  </div>
+  <div id="report-container">
+    <div class="slds-card__header slds-grid">
+      <header class="slds-media slds-media_center slds-has-flexi-truncate">
+        <div class="slds-media__figure">
+          <span class="slds-icon_container slds-icon-standard-contact" title="Report">
+            <svg class="slds-icon slds-icon_small" aria-hidden="true">
+              <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="{!URLFOR($Asset.SLDS, 'assets/icons/standard-sprite/svg/symbols.svg#report')}" />
+            </svg>
+          </span>
+        </div>
+        <div class="slds-media__body">
+          <h2>
+            <span id="report-title" class="slds-text-heading_small"></span>
+          </h2>
+        </div>
+      </header>
+    </div>
+    <div id="warning-container" class="slds-notify slds-notify_alert slds-theme_alert-texture slds-theme_warning" role="alert">
+      <span class="slds-assistive-text">Warning</span>
+      <span class="slds-icon_container slds-icon-utility-warning slds-m-right_x-small">
+        <svg class="slds-icon slds-icon_x-small" aria-hidden="true">
+          <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="{!URLFOR($Asset.SLDS, 'assets/icons/utility-sprite/svg/symbols.svg#warning')}" />
+        </svg>
+      </span>
+      <h2 id="reportErrors"></h2>
+    </div>
+    <div id="table-container" class="scroller"></div>
+  </div>
+  <div id="error-container" class="slds-notify slds-notify_alert slds-theme_alert-texture slds-theme_error" role="alert">
+    <span class="slds-assistive-text">Error</span>
+    <span class="slds-icon_container slds-icon-utility-warning slds-m-right_x-small">
+      <svg class="slds-icon slds-icon_x-small" aria-hidden="true">
+        <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="{!URLFOR($Asset.SLDS, 'assets/icons/utility-sprite/svg/symbols.svg#ban')}" />
+      </svg>
+    </span>
+    <h2 id="responseErrors"></h2>
+  </div>
+  <script>
+
+    /* Main Functions */
+
+    /** 
+     * getReportResultsJSON() calls the controller to retrieve the report results JSON.
+     * If the result is valid, create the report table and populate it with the results.
+     * If the result is invalid or there's a server error, display the error message instead.
+     */
+    function getReportResultsJSON() {
+      var params = getFilterParams();
+      Visualforce.remoting.Manager.invokeAction(
+        '{!$RemoteAction.MobileReportController.getReportMetadata}',
+        '{!$CurrentPage.parameters.id}',
+        params,
+        function(result, event) {
+          var spinnerContainer = document.getElementById("spinner-container");
+          var reportContainer = document.getElementById("report-container");
+          var errorContainer = document.getElementById("error-container");
+          if (event.status) {
+            var resultJSON = JSON.parse(result);
+            if (resultJSON.error) {
+              document.getElementById('responseErrors').innerHTML = "Error:<br/>" + resultJSON.error;
+              spinnerContainer.style.display = "none";
+              errorContainer.style.display = "flex";
+            } else {
+              populateReportTable("table-container", resultJSON);
+              spinnerContainer.style.display = "none";
+              reportContainer.style.display = "block";
+            }
+          } else if (event.type === 'exception') {
+            document.getElementById('responseErrors').innerHTML = "Error:<br/>" + event.message + "<br/>\n<pre>" + event.where + "</pre>";
+            spinnerContainer.style.display = "none";
+            errorContainer.style.display = "flex";
+          } else {
+            document.getElementById('responseErrors').innerHTML = "Error:<br/>" + event.message;
+            spinnerContainer.style.display = "none";
+            errorContainer.style.display = "flex";
+          }
+        },
+        {escape: false}
+      );                                 
+    }
+
+    /** 
+     * populateReportTable() creates an HTML table elment displaying the report results
+     * based on the provided JSON (jsonstring) and appends the table to the provided container element
+     * based on the provided containerId.
+     * Will display a warning for report issues.
+     */ 
+    function populateReportTable(containerId, jsonstring) {
+      document.getElementById("report-title").appendChild(document.createTextNode(jsonstring.reportMetadata.name));
+      
+      if (jsonstring.reportMetadata.reportFormat !== "SUMMARY" && jsonstring.reportMetadata.reportFormat !== "TABULAR") {
+        displayWarning(jsonstring.reportMetadata.reportFormat + " reports are not supported. Please use a Tabular or Summary report.");
+        return;
+      }
+      if ((jsonstring.reportMetadata.reportFormat === "SUMMARY" && !jsonstring.groupingsDown.groupings) || 
+          (jsonstring.reportMetadata.reportFormat === "TABULAR" && !jsonstring.factMap["T!T"].rows)) {
+        displayWarning("The report returned no results.");
+        return;
+      } 
+      if ("{!$User.UITheme}" !== "Theme4t") {
+        displayWarning("This page is optimized for the Salesforce Mobile App. Some features may not be functional outside of the Salesforce Mobile App.");
+      }
+      
+      var labels = jsonstring.reportMetadata.detailColumns.map(function(key) {
+        return jsonstring.reportExtendedMetadata.detailColumnInfo[key].label;
+      });
+      
+      if (jsonstring.reportMetadata.groupingsDown) {
+        labels = labels.concat(jsonstring.reportMetadata.groupingsDown.map(function(grouping) {
+          return jsonstring.reportExtendedMetadata.groupingColumnInfo[grouping.name].label;
+        }));
+      }
+      
+      var tc = document.getElementById(containerId);
+      tc.style.maxHeight = window.innerHeight - tc.getBoundingClientRect().top + "px";
+      
+      var table = document.createElement("table");
+      table.className = "slds-table slds-table_bordered slds-table_col-bordered slds-no-row-hover slds-table_fixed-layout";
+      // Set the table width to the number of columns times 175 (the width of a column)
+      table.style.minWidth = (labels.length * 175) + "px";
+      var thead = createTableHeader(labels);
+      var tbody = createTableBody(jsonstring, labels);
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      tc.appendChild(table);
+      addSortListeners(table);
+    }
+
+    /* Filter Parameter Helpers */
+  
+    // Object matching the FilterParam inner class in the MobileReportController class
+    function FilterParam(index, value) {
+      this.index = index;
+      this.value = value;
+    }
+  
+    /** 
+     * getFilterParams() searches the query string in the URL for fv# (fv0, fv1, etc) values
+     * and returns an array of FilterParam objects, which are used to set/modify report filter metadata values.
+     */ 
+    function getFilterParams() {
+      var match;
+      var plusSign = /\+/g;  // Regex for replacing + with a space
+      var search = /fv(\d+)=?([^&]*)/g;
+      var decode = function (s) { return decodeURIComponent(s.replace(plusSign, " ")); };
+      var query  = window.location.search.substring(1);
+      var urlParams = [];
+        
+      while (match = search.exec(query)) {
+        urlParams.push(new FilterParam(decode(match[1]), decode(match[2])));
+      }
+        
+      return urlParams;
+    }
+
+    /* Column Sorting Helpers */
+
+    // retrieves the text from a provided rows cell based on its index
+    function getCellValue(tr, idx) {
+      return tr.children[idx].innerText || tr.children[idx].textContent;
+    } 
+    // returns the comparison value between two values to be used in the comparer sort function
+    function compareValues(v1, v2) {
+      // If the values are numeric, return a numeric comparison, otherwise return a string comparison
+      return v1 !== '' && v2 !== '' && !isNaN(v1) && !isNaN(v2) ? v1 - v2 : v1.toString().localeCompare(v2);
+    }  
+    // returns a function that compares two values which can be used as a .sort() function. 
+    // Comparison changes based on asc value (asc true = Ascending sort, asc false = Descending sort)
+    function comparer(idx, asc) {
+      return function(a,b) {
+        var v1 = asc ? a : b; 
+        var v2 = asc ? b : a;
+        return compareValues(getCellValue(v1, idx), getCellValue(v2, idx));
+      }
+    } 
+    /** 
+     * sortTableByHeader() sorts the rows in a provided HTML table element (tableEl) based on the provided th element (thEL).
+     * An up or down arrow icon is appended to the provided th element based on the asc value (asc true = arrow up, asc false = arrow down)
+     * and the previously existing icon is removed from if it already existed on a th element.
+     */
+    function sortTableByHeader(tableEl, thEl, asc) {
+      var tbody = tableEl.querySelector("tbody");
+      var rowParent = tbody ? tbody : tableEl;
+      var thDiv = thEl.querySelector("div");
+      var oldIcon = document.getElementById("th-sort-by");
+      Array
+        .from(rowParent.querySelectorAll('tr:nth-child(n+1)'))
+        .sort(comparer(Array.from(thEl.parentNode.children).indexOf(thEl), asc))
+        .forEach(function(tr) { rowParent.appendChild(tr) });
+      if (oldIcon) oldIcon.remove();
+      if (thDiv) thDiv.appendChild(createSortIcon(asc));
+    }
+    
+    /** 
+     * addSortListeners() sorts the rows in a provided HTML table element (tableEl) based on the provided th element (thEL).
+     * Each click on a th changes the asc value (asc true = Ascending, asc false = Descending).
+     */
+    function addSortListeners(tableEl) {
+      var asc = false;
+      tableEl
+        .querySelectorAll('th')
+        .forEach(function(th) { 
+          th.addEventListener('click', (function() {
+            asc = !asc;
+            sortTableByHeader(tableEl, th, asc);
+          }));
+        });
+    }
+
+    /* DOM Element Creation/Manipulation Helpers */
+  
+    // Creates and returns an SLDS icon element based on the provided asc value.
+    function createSortIcon(asc) {
+      var arrow = asc ? "arrowup" : "arrowdown";
+      var span, svg, use;
+      
+      span = document.createElement("span");
+      span.id = "th-sort-by";
+      span.className = "slds-icon_container ";
+      
+      svg = document.createElement("svg");
+      svg.className = "slds-icon slds-icon-text-default slds-icon_x-small";
+      svg.setAttribute("aria-hidden", "true");
+      
+      use = document.createElement("use");
+      use.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+      use.setAttribute("xlink:href", "{!URLFOR($Asset.SLDS, 'assets/icons/utility-sprite/svg/symbols.svg#" + arrow + "')}");
+
+      svg.appendChild(use);
+      span.innerHTML = svg.outerHTML;
+      return span;
+    }
+  
+    // Creates and returns a thead element containing th cells based on the provided headerLabels array of strings.
+    function createTableHeader(headerLabels) {
+      var thead = document.createElement("thead");
+      var theadRow = document.createElement("tr");
+      theadRow.className = "slds-text-title_caps";
+      headerLabels.forEach(function(label) {
+        var th, thDiv, thDivText;
+        
+        th = document.createElement("th");
+        th.setAttribute("scope", "col");
+        
+        thDiv = document.createElement("div");
+        thDiv.className = "slds-truncate";
+        thDiv.setAttribute("title", label);
+        
+        thDivText = document.createTextNode(label);
+
+        thDiv.appendChild(thDivText);
+        th.appendChild(thDiv);
+        theadRow.appendChild(th);
+      });
+      thead.appendChild(theadRow);
+      return thead;
+    }
+  
+    // Creates and returns a td element based on the provided cell data and column name
+    function createTableCell(cellObj, colName) {
+      var td, div, possibleIdValue, cellHTML;
+      var parser = new DOMParser();
+
+      // Create the td element
+      td = document.createElement("td");
+      td.setAttribute("data-label", colName);
+        
+      // Create the inner div element
+      div = document.createElement("div");
+      div.className = "slds-truncate";
+      div.setAttribute("title", cellObj.label);
+        
+      // If the cell's value is a record ID (15 or 18 character string), set the div's innerHTML to a link to the record
+      // Otherwise, just display the label text/HTML
+      possibleIdValue = cellObj.value && typeof cellObj.value === "string" ? cellObj.value.match(/^\w{18}\b|^\w{15}\b/) : null;
+      cellHTML = possibleIdValue ? '<a href="javascript:sforce.one.navigateToSObject(\'' + cellObj.value + '\')">' + cellObj.label + '</a>' : cellObj.label;
+      div.innerHTML = cellHTML;
+        
+      td.appendChild(div);
+      return td;
+    }
+  
+    // Creates and returns a tr element appended with td elements based on the provided row object and column labels
+    function createTableRow(rowObj, labels) {
+      var tr = document.createElement("tr");
+      rowObj.dataCells.forEach(function(cell, index) {
+        var td = createTableCell(cell, labels[index]);
+        tr.appendChild(td);
+      });
+      return tr;
+    }
+    
+    /** 
+     * recurseGroupingsAndAddRows() populates a provided array with tr elements based on the provided 
+     * factMap and summary groupings from report metadata. 
+     *
+     * Used to populate table rows for Summary reports. If a Summary report has multiple summary groupings,
+     * recurse through each grouping (saving the Summary data along the way) and create/populate a tr element
+     * with data from each grouping's rows.
+     */
+    function recurseGroupingsAndAddRows(rowArray, factMap, groupings, labels, extraCells, depth) {
+      if (!depth) depth = 0;
+      groupings.forEach(function(grouping) {
+        var summaryCell = createTableCell(grouping, labels[labels.length - 1 + depth]);
+        if (grouping.groupings) {
+          var summaryCells = extraCells ? extraCells.concat([summaryCell]) : [summaryCell];
+          recurseGroupingsAndAddRows(rowArray, factMap, grouping.groupings, labels, summaryCells, depth + 1);
+        } else {
+          factMap[grouping.key + "!T"].rows.forEach(function(row) {
+            var tr = createTableRow(row, labels);
+            if (extraCells) {
+              extraCells.forEach(function(cell) {
+                tr.appendChild(cell.cloneNode(true));
+              });
+            }
+            tr.appendChild(summaryCell.cloneNode(true));
+            rowArray.push(tr);
+          });
+        }
+      });
+    }
+    
+    // Creates and returns a tbody element populated with tr elements based on data from the provided jsonstring and labels
+    function createTableBody(jsonstring, labels) {
+      var tbody = document.createElement("tbody");
+      var rows = [];
+      if (jsonstring.reportMetadata.reportFormat === "SUMMARY") {
+        recurseGroupingsAndAddRows(rows, jsonstring.factMap, jsonstring.groupingsDown.groupings, labels);
+      } else if (jsonstring.reportMetadata.reportFormat === "TABULAR") {
+        jsonstring.factMap["T!T"].rows.forEach(function(row) {
+          var tr = createTableRow(row, labels);
+          rows.push(tr);
+        });
+      }
+      rows.forEach(function(row) {
+        tbody.appendChild(row);
+      });
+      return tbody;
+    }
+    
+    // Show the hidden warning container and display the provided message string inside.
+    function displayWarning(message) {
+    	document.getElementById("warning-container").style.display = "flex";
+      document.getElementById("reportErrors").innerHTML = message;
+    }
+
+    /* Main Function Calls Run on Page Load */
+
+    getReportResultsJSON();
+  </script>
+</body>
+</html>
+</apex:page>
